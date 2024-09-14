@@ -2,6 +2,8 @@ import requests
 import time
 import json
 from datetime import datetime, timedelta
+import plyer
+import concurrent.futures
 
 # ANSI color codes
 class Colors:
@@ -28,7 +30,28 @@ IPHONE_MODELS = {
     }
 }
 
+COLOR_NAMES = {
+    'desert_gold': '沙漠金',
+    'natural': '原色',
+    'white': '白色',
+    'black': '黑色'
+}
+
 def get_user_preferences():
+    models = []
+    while True:
+        model, model_display = get_single_model_preference()
+        models.append((model, model_display))
+        while True:
+            response = input("是否要繼續添加其他型號？(y/n): ").lower().strip()
+            if response in ['y', 'n']:
+                break
+            print(f"{Colors.RED}無效輸入，請輸入 'y' 或 'n'。{Colors.RESET}")
+        if response == 'n':
+            break
+    return models
+
+def get_single_model_preference():
     print(f"{Colors.BLUE}請回答以下問題來選擇您要查詢的 iPhone 型號：{Colors.RESET}")
     
     # 1. iPhone model
@@ -61,10 +84,12 @@ def get_user_preferences():
     
     model_key = 'pro_max' if model == 'pro max' else 'pro'
     selected_model = IPHONE_MODELS[model_key][color][capacity]
-    print(f"{Colors.GREEN}您選擇的型號是：{selected_model}{Colors.RESET}")
-    return selected_model
+    capacity_display = "1TB" if capacity == 1024 else f"{capacity}GB"
+    model_display = f"{'Pro Max' if model == 'pro max' else 'Pro'} {capacity_display} {COLOR_NAMES[color]} ({selected_model})"
+    print(f"{Colors.GREEN}您選擇的型號是：{model_display}{Colors.RESET}")
+    return selected_model, model_display
 
-def check_stock(model):
+def check_stock(model, model_display):
     url = "https://www.apple.com/tw-edu/shop/fulfillment-messages"
     params = {
         "pl": "true",
@@ -75,40 +100,65 @@ def check_stock(model):
         "location": "110"
     }
     
-    try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            
+            stores = data['body']['content']['pickupMessage']['stores']
+            available_stores = []
+            for store in stores:
+                availability = store['partsAvailability'].get(model)
+                if availability and availability['pickupDisplay'] == 'available':
+                    available_stores.append((store['storeName'], availability['pickupSearchQuote']))
+            
+            return len(available_stores) > 0, available_stores
         
-        stores = data['body']['content']['pickupMessage']['stores']
-        stock_available = False
-        for store in stores:
-            availability = store['partsAvailability'].get(model)
-            if availability and availability['pickupDisplay'] == 'available':
-                print(f"{Colors.GREEN}{Colors.BOLD}庫存可用!{Colors.RESET}")
-                print(f"{Colors.YELLOW}型號: {model}{Colors.RESET}")
-                print(f"{Colors.YELLOW}商店: {store['storeName']}{Colors.RESET}")
-                print(f"{Colors.YELLOW}取貨資訊: {availability['pickupSearchQuote']}{Colors.RESET}")
-                stock_available = True
-        
-        if not stock_available:
-            print(f"{Colors.RED}型號 {model} 在附近商店暫無庫存。{Colors.RESET}")
-        
-        return stock_available
-    
-    except requests.RequestException as e:
-        print(f"{Colors.RED}發生錯誤: {e}{Colors.RESET}")
-        return False
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                print(f"{Colors.YELLOW}檢查失敗，正在重試...{Colors.RESET}")
+                time.sleep(2)
+            else:
+                print(f"{Colors.RED}發生錯誤: {e}{Colors.RESET}")
+                return False, []
+
+def send_notification(title, message):
+    plyer.notification.notify(
+        title=title,
+        message=message,
+        app_name="Apple Store 庫存查詢",
+        timeout=10
+    )
+
+def check_multiple_models(models):
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(models)) as executor:
+        future_to_model = {executor.submit(check_stock, model, model_display): (model, model_display) for model, model_display in models}
+        for future in concurrent.futures.as_completed(future_to_model):
+            model, model_display = future_to_model[future]
+            try:
+                stock_available, available_stores = future.result()
+                results.append((model_display, stock_available, available_stores))
+            except Exception as e:
+                print(f"{Colors.RED}檢查型號 {model_display} 時發生錯誤: {e}{Colors.RESET}")
+    return results
 
 def main():
-    model = get_user_preferences()
+    models = get_user_preferences()
     
-    # Ask if user wants to view check count and elapsed time
-    show_stats = input("是否顯示檢查次數和運行時間？(y/n): ").lower().strip() == 'y'
+    while True:
+        response = input("是否顯示檢查次數和運行時間？(y/n): ").lower().strip()
+        if response in ['y', 'n']:
+            show_stats = (response == 'y')
+            break
+        print(f"{Colors.RED}無效輸入，請輸入 'y' 或 'n'。{Colors.RESET}")
     
-    print(f"{Colors.BLUE}開始持續檢查型號 {model} 的庫存...{Colors.RESET}")
+    print(f"{Colors.BLUE}開始持續查詢選定型號的庫存...{Colors.RESET}")
     
     check_count = 0
+    stock_found_count = 0
     start_time = datetime.now()
     
     while True:
@@ -117,12 +167,24 @@ def main():
         elapsed_time = current_time - start_time
         
         if show_stats:
-            print(f"\n{Colors.BOLD}檢查次數: {check_count}{Colors.RESET}")
-            print(f"{Colors.BOLD}運行時間: {str(elapsed_time).split('.')[0]}{Colors.RESET}")
+            stats = f"檢查次數: {check_count} | 發現庫存次數: {stock_found_count} | 運行時間: {str(elapsed_time).split('.')[0]}"
+            print(f"\n{Colors.BOLD}{stats}{Colors.RESET}")
         
         print(f"{Colors.BOLD}檢查時間: {current_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
         
-        check_stock(model)
+        results = check_multiple_models(models)
+        for model_display, stock_available, available_stores in results:
+            if stock_available:
+                stock_found_count += 1
+                print(f"{Colors.GREEN}{Colors.BOLD}庫存可用!{Colors.RESET}")
+                print(f"{Colors.YELLOW}型號: {model_display}{Colors.RESET}")
+                for store_name, pickup_quote in available_stores:
+                    print(f"{Colors.YELLOW}商店: {store_name}{Colors.RESET}")
+                    print(f"{Colors.YELLOW}取貨資訊: {pickup_quote}{Colors.RESET}")
+                send_notification("庫存已找到!", f"{model_display} 有庫存!")
+            else:
+                print(f"{Colors.RED}型號 {model_display} 在附近商店暫無庫存。{Colors.RESET}")
+        
         time.sleep(1.5)
 
 if __name__ == "__main__":
