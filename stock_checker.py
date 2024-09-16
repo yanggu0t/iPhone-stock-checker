@@ -1,10 +1,11 @@
 import requests
 import time
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import plyer
 import concurrent.futures
 import os
+import js2py
 
 # ANSI color codes
 class Colors:
@@ -15,82 +16,125 @@ class Colors:
     BLUE = '\033[94m'
     BOLD = '\033[1m'
 
-# iPhone model mapping
-IPHONE_MODELS = {
-    'pro': {
-        'desert_gold': {128: 'MYNF3ZP/A', 256: 'MYNK3ZP/A', 512: 'MYNP3ZP/A', 1024: 'MYNW3ZP/A'},
-        'natural': {128: 'MYNG3ZP/A', 256: 'MYNL3ZP/A', 512: 'MYNQ3ZP/A', 1024: 'MYNX3ZP/A'},
-        'white': {128: 'MYNE3ZP/A', 256: 'MYNJ3ZP/A', 512: 'MYNN3ZP/A', 1024: 'MYNT3ZP/A'},
-        'black': {128: 'MYND3ZP/A', 256: 'MYNH3ZP/A', 512: 'MYNM3ZP/A', 1024: 'MYNR3ZP/A'}
-    },
-    'pro_max': {
-        'desert_gold': {256: 'MYWX3ZP/A', 512: 'MYX23ZP/A', 1024: 'MYX63ZP/A'},
-        'natural': {256: 'MYWY3ZP/A', 512: 'MYX33ZP/A', 1024: 'MYX73ZP/A'},
-        'white': {256: 'MYWW3ZP/A', 512: 'MYX13ZP/A', 1024: 'MYX53ZP/A'},
-        'black': {256: 'MYWV3ZP/A', 512: 'MYX03ZP/A', 1024: 'MYX43ZP/A'}
+def fetch_iphone_models():
+    url = "https://www.apple.com/tw/shop/buy-iphone/iphone-16-pro"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-}
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        print(f"{Colors.RED}無法獲取 iPhone 型號數據。請檢查您的網絡連接。{Colors.RESET}")
+        return None
 
-COLOR_NAMES = {
-    'desert_gold': '沙漠金',
-    'natural': '原色',
-    'white': '白色',
-    'black': '黑色'
-}
+    script_content = response.text
+    
+    start_index = script_content.find("window.PRODUCT_SELECTION_BOOTSTRAP")
+    if start_index == -1:
+        print(f"{Colors.RED}無法在頁面中找到產品數據。{Colors.RESET}")
+        return None
 
-def get_user_preferences():
-    models = []
-    added_models = set()  # 用於跟踪已添加的型號
-    while True:
-        model, model_display = get_single_model_preference()
-        if model in added_models:
-            print(f"{Colors.YELLOW}警告：您已經添加過這個型號了。{Colors.RESET}")
-            continue
-        models.append((model, model_display))
-        added_models.add(model)
-        while True:
-            response = input("是否要繼續添加其他型號？(y/n): ").lower().strip()
-            if response in ['y', 'n']:
-                break
-            print(f"{Colors.RED}無效輸入，請輸入 'y' 或 'n'。{Colors.RESET}")
-        if response == 'n':
-            break
+    end_index = script_content.find("</script>", start_index)
+    if end_index == -1:
+        print(f"{Colors.RED}無法解析產品數據。{Colors.RESET}")
+        return None
+
+    js_code = script_content[start_index:end_index]
+    
+    try:
+        context = js2py.EvalJs()
+        context.execute(js_code)
+        product_data = context.PRODUCT_SELECTION_BOOTSTRAP.to_dict()
+        return product_data['productSelectionData']['products']
+    except Exception as e:
+        print(f"{Colors.RED}解析錯誤: {str(e)}{Colors.RESET}")
+        print("JavaScript 代碼片段:")
+        print(js_code[:500])
+        return None
+
+def parse_iphone_models(data):
+    models = {}
+    for product in data:
+        model_name = product['familyType']
+        if model_name not in models:
+            models[model_name] = {
+                'colors': set(),
+                'capacities': set(),
+                'part_numbers': []
+            }
+        
+        color = product['dimensionColor']
+        capacity = product['dimensionCapacity']
+        part_number = product['partNumber']
+        
+        models[model_name]['colors'].add(color)
+        models[model_name]['capacities'].add(capacity)
+        models[model_name]['part_numbers'].append({
+            'color': color,
+            'capacity': capacity,
+            'part_number': part_number
+        })
+
+    for model in models.values():
+        model['colors'] = sorted(model['colors'])
+        model['capacities'] = sorted(model['capacities'])
+
     return models
 
-def get_single_model_preference():
-    print(f"{Colors.BLUE}請回答以下問題來選擇您要查詢的 iPhone 型號：{Colors.RESET}")
-    
+def get_user_preferences(models):
+    selected_models = []
     while True:
-        model = input("1. 請選擇 iPhone 型號 (輸入 'pro' 或 'pro max'): ").lower().strip()
-        if model in ['pro', 'pro max']:
-            break
-        print(f"{Colors.RED}無效輸入，請重試。{Colors.RESET}")
-    
-    valid_capacities = [256, 512, 1024] if model == 'pro max' else [128, 256, 512, 1024]
-    while True:
-        capacity = input(f"2. 請選擇儲存容量 (輸入 {', '.join(map(str, valid_capacities))} 中的一個): ")
+        print(f"\n{Colors.BLUE}可用的 iPhone 型號：{Colors.RESET}")
+        for i, model in enumerate(models.keys(), 1):
+            print(f"{i}. {model}")
+        
+        model_choice = input("請選擇 iPhone 型號 (輸入數字): ")
         try:
-            capacity = int(capacity)
-            if capacity in valid_capacities:
-                break
-            print(f"{Colors.RED}無效輸入，請重試。{Colors.RESET}")
-        except ValueError:
-            print(f"{Colors.RED}請輸入有效的數字。{Colors.RESET}")
-    
-    color_map = {'1': 'desert_gold', '2': 'natural', '3': 'white', '4': 'black'}
-    while True:
-        color = input("3. 請選擇顏色 (1.沙漠金 2.原色 3.白色 4.黑色): ").strip()
-        if color in color_map:
-            color = color_map[color]
+            model_index = int(model_choice) - 1
+            selected_model = list(models.keys())[model_index]
+        except (ValueError, IndexError):
+            print(f"{Colors.RED}無效的選擇，請重試。{Colors.RESET}")
+            continue
+
+        print(f"\n{Colors.BLUE}可用的顏色：{Colors.RESET}")
+        for i, color in enumerate(models[selected_model]['colors'], 1):
+            print(f"{i}. {color}")
+        
+        color_choice = input("請選擇顏色 (輸入數字): ")
+        try:
+            color_index = int(color_choice) - 1
+            selected_color = models[selected_model]['colors'][color_index]
+        except (ValueError, IndexError):
+            print(f"{Colors.RED}無效的選擇，請重試。{Colors.RESET}")
+            continue
+
+        print(f"\n{Colors.BLUE}可用的容量：{Colors.RESET}")
+        for i, capacity in enumerate(models[selected_model]['capacities'], 1):
+            print(f"{i}. {capacity}")
+        
+        capacity_choice = input("請選擇容量 (輸入數字): ")
+        try:
+            capacity_index = int(capacity_choice) - 1
+            selected_capacity = models[selected_model]['capacities'][capacity_index]
+        except (ValueError, IndexError):
+            print(f"{Colors.RED}無效的選擇，請重試。{Colors.RESET}")
+            continue
+
+        part_number = next((item['part_number'] for item in models[selected_model]['part_numbers'] 
+                            if item['color'] == selected_color 
+                            and item['capacity'] == selected_capacity), None)
+        
+        if part_number:
+            screen_size = "6.3 吋" if "pro" in selected_model.lower() else "6.9 吋"
+            model_display = f"{selected_model} {selected_capacity} {selected_color} {screen_size}"
+            selected_models.append((part_number, model_display))
+            print(f"{Colors.GREEN}您選擇的型號是：{model_display} (部件編號: {part_number}){Colors.RESET}")
+        else:
+            print(f"{Colors.RED}無法獲取該型號的部件編號。跳過此選擇。{Colors.RESET}")
+
+        if input("是否要繼續添加其他型號？(y/n): ").lower().strip() != 'y':
             break
-        print(f"{Colors.RED}無效輸入，請重試。{Colors.RESET}")
-    
-    model_key = 'pro_max' if model == 'pro max' else 'pro'
-    selected_model = IPHONE_MODELS[model_key][color][capacity]
-    capacity_display = "1TB" if capacity == 1024 else f"{capacity}GB"
-    model_display = f"{'Pro Max' if model == 'pro max' else 'Pro'} {capacity_display} {COLOR_NAMES[color]} ({selected_model})"
-    print(f"{Colors.GREEN}您選擇的型號是：{model_display}{Colors.RESET}")
-    return selected_model, model_display
+
+    return selected_models
 
 def check_stock(model, model_display):
     url = "https://www.apple.com/tw-edu/shop/fulfillment-messages"
@@ -161,8 +205,22 @@ def play_alert():
             time.sleep(0.1)
 
 def main():
-    models = get_user_preferences()
-    
+    print(f"{Colors.BLUE}正在獲取最新的 iPhone 型號數據...{Colors.RESET}")
+    product_data = fetch_iphone_models()
+    if not product_data:
+        print(f"{Colors.RED}無法獲取產品數據。程序將退出。{Colors.RESET}")
+        return
+
+    models = parse_iphone_models(product_data)
+    if not models:
+        print(f"{Colors.RED}無法解析產品數據。程序將退出。{Colors.RESET}")
+        return
+
+    selected_models = get_user_preferences(models)
+    if not selected_models:
+        print(f"{Colors.RED}未選擇任何型號。程序將退出。{Colors.RESET}")
+        return
+
     while True:
         show_stats = input("是否顯示檢查次數和運行時間？(y/n): ").lower().strip()
         if show_stats in ['y', 'n']:
@@ -188,7 +246,7 @@ def main():
             
             print(f"{Colors.BOLD}檢查時間: {current_time.strftime('%Y-%m-%d %H:%M:%S')}{Colors.RESET}")
             
-            for model_display, stock_available, available_stores in check_multiple_models(models):
+            for model_display, stock_available, available_stores in check_multiple_models(selected_models):
                 if stock_available:
                     stock_found_count += 1
                     print(f"{Colors.GREEN}{Colors.BOLD}庫存可用!{Colors.RESET}")
